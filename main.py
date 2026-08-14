@@ -23,11 +23,16 @@ TTA_N_AUG = metadata["tta_n_aug"]
 
 app = FastAPI(title="Pneumonia Detection API")
 
-# Allow your React/Capacitor app to call this from any origin during development.
-# Tighten this to your actual app's domain before going to production.
+# Explicitly allow Capacitor Android Webview origins along with a general wildcard
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "*", 
+        "http://localhost", 
+        "https://localhost", 
+        "capacitor://localhost"
+    ],
+    allow_credentials=False, # Must be False when using "*" in FastAPI
     allow_methods=["*"],
     allow_headers=["*"],
 )
