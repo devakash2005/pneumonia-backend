@@ -1,36 +1,46 @@
+import os
+
+# Limit TensorFlow threading to minimize memory footprint
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
+os.environ["TF_NUM_INTEROP_THREADS"] = "1"
+
+import io
+import gc
 import json
 import numpy as np
 import tensorflow as tf
+from PIL import Image
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
-import io
-import gc  # Added for memory management
 from tensorflow.keras.applications.densenet import preprocess_input
 
-# ---- Load model + metadata once, at startup ----
+# Restrict thread pools inside TensorFlow
+tf.config.threading.set_inter_op_parallelism_threads(1)
+tf.config.threading.set_intra_op_parallelism_threads(1)
+
+# ---- Load model + metadata once ----
 with open("metadata.json", "r") as f:
     metadata = json.load(f)
 
 model = tf.keras.models.load_model("model_final.h5")
 
-CLASS_NAMES = metadata["class_names"]          
-IMG_SIZE = tuple(metadata["img_size"])          
-THRESHOLD = metadata["decision_threshold"]      
+CLASS_NAMES = metadata["class_names"]
+IMG_SIZE = tuple(metadata["img_size"])
+THRESHOLD = metadata["decision_threshold"]
 UNCERTAIN_LOW = metadata["uncertain_band"]["low"]
 UNCERTAIN_HIGH = metadata["uncertain_band"]["high"]
-USE_TTA = metadata["use_tta_at_inference"]
-TTA_N_AUG = metadata["tta_n_aug"]
 
 app = FastAPI(title="Pneumonia Detection API")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "*", 
-        "http://localhost", 
-        "https://localhost", 
-        "capacitor://localhost"
+        "*",
+        "http://localhost",
+        "https://localhost",
+        "capacitor://localhost",
     ],
     allow_credentials=False,
     allow_methods=["*"],
@@ -43,36 +53,18 @@ def preprocess_image(image_bytes: bytes) -> np.ndarray:
     img = img.resize(IMG_SIZE)
     arr = tf.keras.preprocessing.image.img_to_array(img)
     arr = preprocess_input(arr)
+    del img
     return arr
 
 
-def predict_with_tta(img_array: np.ndarray, n_aug: int = 4) -> float:
-    views = [img_array]
-    views.append(np.fliplr(img_array))
-
-    for _ in range(n_aug - len(views)):
-        angle = np.random.uniform(-8, 8)
-        rotated = tf.keras.preprocessing.image.apply_affine_transform(
-            img_array, theta=angle, fill_mode="nearest"
-        )
-        views.append(rotated)
-
-    batch = np.stack(views, axis=0)
-    
-    # OPTIMIZATION: Use model(..., training=False) instead of model.predict(...) to prevent memory leaks
-    probs = model(batch, training=False).numpy().ravel()
-    
-    mean_prob = float(probs.mean())
-    
-    # MEMORY CLEANUP: Delete heavy arrays
-    del views
-    del batch
-    del probs
-    
-    return mean_prob
+def predict_single(img_array: np.ndarray) -> float:
+    """Predicts a single image without building multi-tensor batches."""
+    inp = np.expand_dims(img_array, axis=0)
+    pred = float(model(inp, training=False).numpy()[0][0])
+    del inp
+    return pred
 
 
-# OPTIMIZATION: Allow Render's internal health check (HEAD request)
 @app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {"status": "ok", "message": "Pneumonia Detection API is running"}
@@ -86,12 +78,10 @@ def is_likely_xray(image_bytes: bytes) -> bool:
     r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
     channel_diff = (np.abs(r - g) + np.abs(g - b) + np.abs(r - b)).mean()
 
-    # MEMORY CLEANUP
     del img
     del img_small
     del arr
-    
-    return channel_diff < 15  
+    return channel_diff < 15
 
 
 @app.post("/predict")
@@ -102,7 +92,6 @@ async def predict(file: UploadFile = File(...)):
     image_bytes = await file.read()
 
     if not is_likely_xray(image_bytes):
-        # Clear bytes from memory if rejected
         del image_bytes
         gc.collect()
         return {
@@ -120,16 +109,11 @@ async def predict(file: UploadFile = File(...)):
         gc.collect()
         raise HTTPException(status_code=400, detail="Could not read this image. Try a different file.")
 
-    if USE_TTA:
-        prob_pneumonia = predict_with_tta(img_array, n_aug=TTA_N_AUG)
-    else:
-        # OPTIMIZATION: model() instead of model.predict()
-        expanded_array = np.expand_dims(img_array, axis=0)
-        prob_pneumonia = float(model(expanded_array, training=False).numpy()[0][0])
-        del expanded_array
-
-    # MEMORY CLEANUP: Delete everything we don't need before returning the response
     del image_bytes
+
+    # Run lightweight single-tensor inference
+    prob_pneumonia = predict_single(img_array)
+
     del img_array
     gc.collect()
 
@@ -148,7 +132,7 @@ async def predict(file: UploadFile = File(...)):
         suggestion = "Normal — no signs of pneumonia detected."
     elif label == "UNCERTAIN":
         suggestion = "Result unclear — please consult a doctor for a proper diagnosis."
-    else:  
+    else:
         suggestion = "Signs of pneumonia detected — please consult a doctor."
 
     return {
