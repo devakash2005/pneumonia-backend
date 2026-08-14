@@ -1,0 +1,32 @@
+{
+  "class_names": [
+    "NORMAL",
+    "PNEUMONIA"
+  ],
+  "img_size": [
+    224,
+    224
+  ],
+  "preprocessing": "tensorflow.keras.applications.densenet.preprocess_input",
+  "decision_threshold": 0.3957616984844208,
+  "threshold_strategy": "recall-first (recall >= 95%)",
+  "f1_optimal_threshold_reference": 0.08305077999830246,
+  "uncertain_band": {
+    "low": 0.29576170444488525,
+    "high": 0.4957616925239563,
+    "note": "Probabilities inside [low, high] should be shown as \"Uncertain\" in the app UI."
+  },
+  "use_tta_at_inference": true,
+  "tta_n_aug": 4,
+  "test_metrics_at_threshold": {
+    "threshold": 0.3957616984844208,
+    "accuracy": 0.978125,
+    "precision": 0.9935483870967742,
+    "recall": 0.9625,
+    "f1": 0.9777777777777777,
+    "mcc": 0.9567172612055053,
+    "auc_roc": 0.9984814453125,
+    "auc_pr": 0.9985488924187315
+  },
+  "disclaimer": "Trained on a single-source pediatric chest X-ray dataset. Educational/demo use only, not a diagnostic tool."
+}
