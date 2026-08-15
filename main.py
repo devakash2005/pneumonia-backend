@@ -1,4 +1,5 @@
 import os
+from tensorflow.keras import backend as K
 
 # Limit TensorFlow threading to minimize memory footprint
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -116,6 +117,9 @@ async def predict(file: UploadFile = File(...)):
 
     del img_array
     gc.collect()
+    
+    # NEW: Completely wipe TensorFlow's hidden memory state
+    K.clear_session() 
 
     if UNCERTAIN_LOW <= prob_pneumonia <= UNCERTAIN_HIGH:
         label = "UNCERTAIN"
