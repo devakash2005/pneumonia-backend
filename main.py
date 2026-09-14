@@ -16,7 +16,13 @@ from PIL import Image
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from tensorflow.keras.applications.densenet import preprocess_input
-from pydantic import BaseModel  # <-- Correctly placed at the top with other imports
+from pydantic import BaseModel
+
+# Initialize Google Gemini Client (looks for GEMINI_API_KEY environment variable)
+from google import genai
+from google.genai import types
+
+ai_client = genai.Client()
 
 # Restrict thread pools inside TensorFlow
 tf.config.threading.set_inter_op_parallelism_threads(1)
@@ -149,23 +155,29 @@ async def predict(file: UploadFile = File(...)):
     }
 
 
-# ---- Virtual Doctor Assistant Endpoint ----
+# ---- Gemini-Powered Virtual Doctor Assistant Endpoint ----
 class DoctorQuery(BaseModel):
     prompt: str
 
 
 @app.post("/virtual-doctor")
 async def virtual_doctor_response(query: DoctorQuery):
-    user_text = query.prompt.lower()
-    
-    # Clinical rule-based guidance for your PneumoVision AI assistant
-    if "pneumonia" in user_text:
-        reply = "Pneumonia is an infection that inflames the air sacs in one or both lungs. If a screening has detected signs of pneumonia, it is critical to consult a pulmonologist or physician immediately for clinical evaluation."
-    elif "treatment" in user_text or "cure" in user_text or "medicine" in user_text:
-        reply = "Treatment varies based on whether the cause is bacterial or viral. Bacterial infections typically require antibiotics, while viral cases focus on rest and symptom support. Always follow a medical professional's prescription."
-    elif "normal" in user_text:
-        reply = "A 'Normal' result means no prominent signs of pneumonia were flagged by the scan, but if symptoms like coughing, fever, or shortness of breath persist, you should still consult a doctor."
-    else:
-        reply = "I am the PneumoVision AI virtual assistant. I can help answer general questions about your X-ray screening reports, but I am not a substitute for professional medical advice, diagnosis, or treatment."
-        
+    try:
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=query.prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=(
+                    "You are the virtual medical assistant for PneumoVision AI, a mobile app that detects pneumonia from X-ray scans. "
+                    "Provide helpful, concise, and empathetic educational responses about respiratory health, symptoms, and scan interpretations. "
+                    "Always maintain professional boundaries and include a brief reminder that you are an AI assistant and they should consult a certified physician for medical diagnosis."
+                ),
+                max_output_tokens=300,
+                temperature=0.7,
+            ),
+        )
+        reply = response.text
+    except Exception as e:
+        reply = "I am currently experiencing high traffic or connectivity limits. Please consult a healthcare professional for immediate medical advice."
+
     return {"reply": reply}

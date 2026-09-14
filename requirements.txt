@@ -5,3 +5,4 @@ pillow
 numpy
 scipy
 python-multipart
+google-genai
