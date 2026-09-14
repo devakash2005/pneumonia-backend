@@ -163,19 +163,20 @@ class DoctorQuery(BaseModel):
 @app.post("/virtual-doctor")
 async def virtual_doctor_response(query: DoctorQuery):
     try:
-        chat = ai_client.chats.create(
+        # Use direct generate_content for clean, standalone, complete responses
+        response = ai_client.models.generate_content(
             model='gemini-3.6-flash',
+            contents=query.prompt,
             config=types.GenerateContentConfig(
                 system_instruction=(
                     "You are the virtual medical assistant for PneumoVision AI, a mobile app that detects pneumonia from X-ray scans. "
                     "Provide helpful, concise, and empathetic educational responses about respiratory health, symptoms, and scan interpretations. "
                     "Always maintain professional boundaries and include a brief reminder that you are an AI assistant and they should consult a certified physician for medical diagnosis."
                 ),
-                max_output_tokens=300,
+                max_output_tokens=500,
                 temperature=0.7,
-            )
+            ),
         )
-        response = chat.send_message(query.prompt)
         reply = response.text
     except Exception as e:
         reply = "I am currently experiencing high traffic or connectivity limits. Please consult a healthcare professional for immediate medical advice."
