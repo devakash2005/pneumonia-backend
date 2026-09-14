@@ -16,6 +16,7 @@ from PIL import Image
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from tensorflow.keras.applications.densenet import preprocess_input
+from pydantic import BaseModel  # <-- Correctly placed at the top with other imports
 
 # Restrict thread pools inside TensorFlow
 tf.config.threading.set_inter_op_parallelism_threads(1)
@@ -118,7 +119,7 @@ async def predict(file: UploadFile = File(...)):
     del img_array
     gc.collect()
     
-    # NEW: Completely wipe TensorFlow's hidden memory state
+    # Completely wipe TensorFlow's hidden memory state
     K.clear_session() 
 
     if UNCERTAIN_LOW <= prob_pneumonia <= UNCERTAIN_HIGH:
@@ -146,3 +147,25 @@ async def predict(file: UploadFile = File(...)):
         "suggestion": suggestion,
         "disclaimer": metadata.get("disclaimer", ""),
     }
+
+
+# ---- Virtual Doctor Assistant Endpoint ----
+class DoctorQuery(BaseModel):
+    prompt: str
+
+
+@app.post("/virtual-doctor")
+async def virtual_doctor_response(query: DoctorQuery):
+    user_text = query.prompt.lower()
+    
+    # Clinical rule-based guidance for your PneumoVision AI assistant
+    if "pneumonia" in user_text:
+        reply = "Pneumonia is an infection that inflames the air sacs in one or both lungs. If a screening has detected signs of pneumonia, it is critical to consult a pulmonologist or physician immediately for clinical evaluation."
+    elif "treatment" in user_text or "cure" in user_text or "medicine" in user_text:
+        reply = "Treatment varies based on whether the cause is bacterial or viral. Bacterial infections typically require antibiotics, while viral cases focus on rest and symptom support. Always follow a medical professional's prescription."
+    elif "normal" in user_text:
+        reply = "A 'Normal' result means no prominent signs of pneumonia were flagged by the scan, but if symptoms like coughing, fever, or shortness of breath persist, you should still consult a doctor."
+    else:
+        reply = "I am the PneumoVision AI virtual assistant. I can help answer general questions about your X-ray screening reports, but I am not a substitute for professional medical advice, diagnosis, or treatment."
+        
+    return {"reply": reply}
