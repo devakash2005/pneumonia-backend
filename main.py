@@ -164,7 +164,7 @@ class DoctorQuery(BaseModel):
 async def virtual_doctor_response(query: DoctorQuery):
     try:
         chat = ai_client.chats.create(
-            model='gemini-3.6-flash',  # Updated to the active supported model version
+            model='gemini-3.6-flash',
             config=types.GenerateContentConfig(
                 system_instruction=(
                     "You are the virtual medical assistant for PneumoVision AI, a mobile app that detects pneumonia from X-ray scans. "
@@ -178,6 +178,6 @@ async def virtual_doctor_response(query: DoctorQuery):
         response = chat.send_message(query.prompt)
         reply = response.text
     except Exception as e:
-        reply = f"Error details: {str(e)}"
+        reply = "I am currently experiencing high traffic or connectivity limits. Please consult a healthcare professional for immediate medical advice."
 
     return {"reply": reply}
