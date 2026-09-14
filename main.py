@@ -164,7 +164,7 @@ class DoctorQuery(BaseModel):
 async def virtual_doctor_response(query: DoctorQuery):
     try:
         chat = ai_client.chats.create(
-            model='gemini-2.5-flash',
+            model='gemini-3.6-flash',  # Updated to the active supported model version
             config=types.GenerateContentConfig(
                 system_instruction=(
                     "You are the virtual medical assistant for PneumoVision AI, a mobile app that detects pneumonia from X-ray scans. "
@@ -178,7 +178,6 @@ async def virtual_doctor_response(query: DoctorQuery):
         response = chat.send_message(query.prompt)
         reply = response.text
     except Exception as e:
-        print("VIRTUAL DOCTOR ERROR:", str(e))  # <-- This prints the real error to Render logs
-        reply = f"Error details: {str(e)}"      # <-- Temporarily return the error to your app so you can see it on screen
+        reply = f"Error details: {str(e)}"
 
     return {"reply": reply}
