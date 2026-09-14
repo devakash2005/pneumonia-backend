@@ -178,6 +178,7 @@ async def virtual_doctor_response(query: DoctorQuery):
         response = chat.send_message(query.prompt)
         reply = response.text
     except Exception as e:
-        reply = "I am currently experiencing high traffic or connectivity limits. Please consult a healthcare professional for immediate medical advice."
+        print("VIRTUAL DOCTOR ERROR:", str(e))  # <-- This prints the real error to Render logs
+        reply = f"Error details: {str(e)}"      # <-- Temporarily return the error to your app so you can see it on screen
 
     return {"reply": reply}
