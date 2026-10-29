@@ -10,19 +10,28 @@ os.environ["TF_NUM_INTEROP_THREADS"] = "1"
 import io
 import gc
 import json
+import time
+import asyncio
 import numpy as np
 import tensorflow as tf
 from PIL import Image
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from tensorflow.keras.applications.densenet import preprocess_input
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from datetime import datetime
 
-# Initialize Google Gemini Client (looks for GEMINI_API_KEY environment variable)
+# Database imports
+from database import engine, get_db
+import models
+
+# Modern Google GenAI SDK Import
 from google import genai
 from google.genai import types
 
-ai_client = genai.Client()
+# === YOUR ACTIVE API KEY ===
+ai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 # Restrict thread pools inside TensorFlow
 tf.config.threading.set_inter_op_parallelism_threads(1)
@@ -41,6 +50,9 @@ UNCERTAIN_LOW = metadata["uncertain_band"]["low"]
 UNCERTAIN_HIGH = metadata["uncertain_band"]["high"]
 
 app = FastAPI(title="Pneumonia Detection API")
+
+# Automatically create PostgreSQL tables on startup
+models.Base.metadata.create_all(bind=engine)
 
 app.add_middleware(
     CORSMiddleware,
@@ -155,30 +167,130 @@ async def predict(file: UploadFile = File(...)):
     }
 
 
-# ---- Gemini-Powered Virtual Doctor Assistant Endpoint ----
+# ---- Gemini-Powered Virtual Doctor Assistant Endpoint (Strictly Scoped) ----
 class DoctorQuery(BaseModel):
     prompt: str
+    user_email: str = None  # Optional: logs conversation to DB if provided
 
 
 @app.post("/virtual-doctor")
-async def virtual_doctor_response(query: DoctorQuery):
-    try:
-        # Use direct generate_content for clean, standalone, complete responses
-        response = ai_client.models.generate_content(
-            model='gemini-3.6-flash',
+async def virtual_doctor_response(query: DoctorQuery, db: Session = Depends(get_db)):
+    def call_gemini(model_name):
+        return ai_client.models.generate_content(
+            model=model_name,
             contents=query.prompt,
             config=types.GenerateContentConfig(
                 system_instruction=(
                     "You are the virtual medical assistant for PneumoVision AI, a mobile app that detects pneumonia from X-ray scans. "
-                    "Provide helpful, concise, and empathetic educational responses about respiratory health, symptoms, and scan interpretations. "
+                    "Provide helpful, concise, and empathetic educational responses about respiratory health, symptoms, prevention methods, and medical triage next steps. "
+                    "STRICT RULE: If a user asks about anything unrelated to pneumonia, respiratory health, or medical triage "
+                    "(such as coding, python, general history, math, cooking, or unrelated diseases), you MUST refuse to answer "
+                    "and reply strictly with: 'I am specialized exclusively in pneumonia and respiratory health triage. "
+                    "How can I assist you with pneumonia symptoms, prevention, or medical next steps today?' "
                     "Always maintain professional boundaries and include a brief reminder that you are an AI assistant and they should consult a certified physician for medical diagnosis."
                 ),
-                max_output_tokens=500,
-                temperature=0.7,
+                max_output_tokens=2048,
+                temperature=0.3,
             ),
         )
-        reply = response.text
-    except Exception as e:
-        reply = "I am currently experiencing high traffic or connectivity limits. Please consult a healthcare professional for immediate medical advice."
+
+    reply = ""
+    models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash']
+
+    for model_id in models_to_try:
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(call_gemini, model_id), timeout=10.0
+            )
+            if response and hasattr(response, 'text'):
+                reply = response.text
+                break
+        except Exception as e:
+            error_str = str(e)
+            print(f"Model {model_id} failed with error: {error_str}")
+            if "503" in error_str or "UNAVAILABLE" in error_str or "high demand" in error_str or "NOT_FOUND" in error_str or "PERMISSION_DENIED" in error_str:
+                continue
+            else:
+                reply = f"Error processing query: {error_str}"
+                break
+
+    if not reply:
+        reply = "The AI service is currently busy. Please verify your API key permissions in Google AI Studio or try again in a moment."
+
+    # Automatically save chat history to PostgreSQL if user_email is sent from frontend
+    if query.user_email:
+        try:
+            user_chat = models.ChatHistory(user_email=query.user_email, sender="user", message=query.prompt)
+            ai_chat = models.ChatHistory(user_email=query.user_email, sender="ai", message=reply)
+            db.add(user_chat)
+            db.add(ai_chat)
+            db.commit()
+        except Exception as ex:
+            print(f"Database chat save error: {ex}")
 
     return {"reply": reply}
+
+
+# ---- PostgreSQL User, Scan History & Chat Endpoints ----
+
+class UserProfile(BaseModel):
+    email: str
+    name: str
+    photo: str = None
+
+class ScanData(BaseModel):
+    user_email: str
+    label: str
+    probability: float
+    date: str
+
+class ChatMessage(BaseModel):
+    user_email: str
+    sender: str  # 'user' or 'ai'
+    message: str
+
+@app.post("/api/user")
+def save_user(profile: UserProfile, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.email == profile.email).first()
+    if not user:
+        user = models.User(email=profile.email, name=profile.name, photo=profile.photo)
+        db.add(user)
+    else:
+        user.name = profile.name
+        user.photo = profile.photo
+    db.commit()
+    db.refresh(user)
+    return {"message": "User saved successfully", "email": user.email}
+
+@app.post("/api/scans")
+def save_scan(scan: ScanData, db: Session = Depends(get_db)):
+    db_scan = models.ScanRecord(
+        user_email=scan.user_email,
+        label=scan.label,
+        probability=scan.probability,
+        date=scan.date
+    )
+    db.add(db_scan)
+    db.commit()
+    return {"message": "Scan recorded successfully"}
+
+@app.get("/api/scans/{user_email}")
+def get_user_scans(user_email: str, db: Session = Depends(get_db)):
+    scans = db.query(models.ScanRecord).filter(models.ScanRecord.user_email == user_email).all()
+    return scans
+
+@app.post("/api/chat")
+def save_chat_message(chat: ChatMessage, db: Session = Depends(get_db)):
+    db_chat = models.ChatHistory(
+        user_email=chat.user_email,
+        sender=chat.sender,
+        message=chat.message
+    )
+    db.add(db_chat)
+    db.commit()
+    return {"message": "Chat saved successfully"}
+
+@app.get("/api/chat/{user_email}")
+def get_user_chat_history(user_email: str, db: Session = Depends(get_db)):
+    chats = db.query(models.ChatHistory).filter(models.ChatHistory.user_email == user_email).order_by(models.ChatHistory.timestamp.asc()).all()
+    return chats
