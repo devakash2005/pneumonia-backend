@@ -9,3 +9,4 @@ google-genai==1.0.0
 protobuf<6.0.0
 sqlalchemy==2.0.28
 pydantic==2.6.4
+gunicorn==21.2.0

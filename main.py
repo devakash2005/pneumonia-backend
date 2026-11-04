@@ -30,7 +30,7 @@ import models
 from google import genai
 from google.genai import types
 
-# === YOUR ACTIVE API KEY ===
+# === SECURE API KEY CONFIGURATION ===
 ai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 # Restrict thread pools inside TensorFlow
@@ -111,34 +111,32 @@ async def predict(file: UploadFile = File(...)):
 
     image_bytes = await file.read()
 
-    if not is_likely_xray(image_bytes):
-        del image_bytes
-        gc.collect()
-        return {
-            "label": "INVALID_IMAGE",
-            "probability_pneumonia": None,
-            "threshold_used": THRESHOLD,
-            "suggestion": "Please upload a valid chest X-ray image.",
-            "disclaimer": metadata.get("disclaimer", ""),
-        }
-
     try:
-        img_array = preprocess_image(image_bytes)
-    except Exception:
-        del image_bytes
+        if not is_likely_xray(image_bytes):
+            return {
+                "label": "INVALID_IMAGE",
+                "probability_pneumonia": None,
+                "threshold_used": THRESHOLD,
+                "suggestion": "Please upload a valid chest X-ray image.",
+                "disclaimer": metadata.get("disclaimer", ""),
+            }
+
+        try:
+            img_array = preprocess_image(image_bytes)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Could not read this image. Try a different file.")
+
+        # Run lightweight single-tensor inference
+        prob_pneumonia = predict_single(img_array)
+
+    finally:
+        # Force immediate RAM cleanup to prevent Render memory limit crashes
+        if 'image_bytes' in locals():
+            del image_bytes
+        if 'img_array' in locals():
+            del img_array
         gc.collect()
-        raise HTTPException(status_code=400, detail="Could not read this image. Try a different file.")
-
-    del image_bytes
-
-    # Run lightweight single-tensor inference
-    prob_pneumonia = predict_single(img_array)
-
-    del img_array
-    gc.collect()
-    
-    # Completely wipe TensorFlow's hidden memory state
-    K.clear_session() 
+        K.clear_session()
 
     if UNCERTAIN_LOW <= prob_pneumonia <= UNCERTAIN_HIGH:
         label = "UNCERTAIN"
