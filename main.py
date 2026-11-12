@@ -1,8 +1,8 @@
 import os
-from tensorflow.keras import backend as K
 
-# Limit TensorFlow threading to minimize memory footprint
+# These MUST be set before TensorFlow is imported
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
 os.environ["TF_NUM_INTEROP_THREADS"] = "1"
@@ -41,13 +41,18 @@ tf.config.threading.set_intra_op_parallelism_threads(1)
 with open("metadata.json", "r") as f:
     metadata = json.load(f)
 
-model = tf.keras.models.load_model("model_final.h5")
+# compile=False skips optimizer/metrics state, which is not needed for prediction
+model = tf.keras.models.load_model("model_final.h5", compile=False)
 
 CLASS_NAMES = metadata["class_names"]
 IMG_SIZE = tuple(metadata["img_size"])
 THRESHOLD = metadata["decision_threshold"]
 UNCERTAIN_LOW = metadata["uncertain_band"]["low"]
 UNCERTAIN_HIGH = metadata["uncertain_band"]["high"]
+
+# Warm-up: do the big first-time memory allocation at startup, not on the first upload
+model(np.zeros((1, *IMG_SIZE, 3), dtype=np.float32), training=False)
+gc.collect()
 
 app = FastAPI(title="Pneumonia Detection API")
 
@@ -69,7 +74,9 @@ app.add_middleware(
 
 
 def preprocess_image(image_bytes: bytes) -> np.ndarray:
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img = Image.open(io.BytesIO(image_bytes))
+    img.draft("RGB", (512, 512))  # JPEG only: decode at reduced size to save memory
+    img = img.convert("RGB")
     img = img.resize(IMG_SIZE)
     arr = tf.keras.preprocessing.image.img_to_array(img)
     arr = preprocess_input(arr)
@@ -91,7 +98,9 @@ def root():
 
 
 def is_likely_xray(image_bytes: bytes) -> bool:
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img = Image.open(io.BytesIO(image_bytes))
+    img.draft("RGB", (512, 512))  # JPEG only: decode at reduced size to save memory
+    img = img.convert("RGB")
     img_small = img.resize((64, 64))
     arr = np.array(img_small).astype(np.float32)
 
@@ -130,13 +139,12 @@ async def predict(file: UploadFile = File(...)):
         prob_pneumonia = predict_single(img_array)
 
     finally:
-        # Force immediate RAM cleanup to prevent Render memory limit crashes
+        # Free RAM right away to stay under Render's memory limit
         if 'image_bytes' in locals():
             del image_bytes
         if 'img_array' in locals():
             del img_array
         gc.collect()
-        K.clear_session()
 
     if UNCERTAIN_LOW <= prob_pneumonia <= UNCERTAIN_HIGH:
         label = "UNCERTAIN"
