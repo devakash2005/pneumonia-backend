@@ -1,26 +1,15 @@
 import os
-
-# These MUST be set before TensorFlow is imported
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
-os.environ["TF_NUM_INTEROP_THREADS"] = "1"
-
 import io
 import gc
 import json
-import time
 import asyncio
 import numpy as np
-import tensorflow as tf
 from PIL import Image
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from tensorflow.keras.applications.densenet import preprocess_input
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from datetime import datetime
+from ai_edge_litert.interpreter import Interpreter
 
 # Database imports
 from database import engine, get_db
@@ -33,16 +22,9 @@ from google.genai import types
 # === SECURE API KEY CONFIGURATION ===
 ai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-# Restrict thread pools inside TensorFlow
-tf.config.threading.set_inter_op_parallelism_threads(1)
-tf.config.threading.set_intra_op_parallelism_threads(1)
-
-# ---- Load model + metadata once ----
+# ---- Load metadata + lightweight model once ----
 with open("metadata.json", "r") as f:
     metadata = json.load(f)
-
-# compile=False skips optimizer/metrics state, which is not needed for prediction
-model = tf.keras.models.load_model("model_final.h5", compile=False)
 
 CLASS_NAMES = metadata["class_names"]
 IMG_SIZE = tuple(metadata["img_size"])
@@ -50,8 +32,18 @@ THRESHOLD = metadata["decision_threshold"]
 UNCERTAIN_LOW = metadata["uncertain_band"]["low"]
 UNCERTAIN_HIGH = metadata["uncertain_band"]["high"]
 
-# Warm-up: do the big first-time memory allocation at startup, not on the first upload
-model(np.zeros((1, *IMG_SIZE, 3), dtype=np.float32), training=False)
+# Same math as Keras DenseNet preprocess_input, written in plain NumPy
+MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+interpreter = Interpreter(model_path="model_final.tflite", num_threads=1)
+interpreter.allocate_tensors()
+input_details = interpreter.get_input_details()[0]
+output_details = interpreter.get_output_details()[0]
+
+# Warm-up: do the first-time memory allocation at startup, not on the first upload
+interpreter.set_tensor(input_details["index"], np.zeros((1, *IMG_SIZE, 3), dtype=np.float32))
+interpreter.invoke()
 gc.collect()
 
 app = FastAPI(title="Pneumonia Detection API")
@@ -78,16 +70,18 @@ def preprocess_image(image_bytes: bytes) -> np.ndarray:
     img.draft("RGB", (512, 512))  # JPEG only: decode at reduced size to save memory
     img = img.convert("RGB")
     img = img.resize(IMG_SIZE)
-    arr = tf.keras.preprocessing.image.img_to_array(img)
-    arr = preprocess_input(arr)
+    arr = np.asarray(img, dtype=np.float32) / 255.0
+    arr = (arr - MEAN) / STD
     del img
     return arr
 
 
 def predict_single(img_array: np.ndarray) -> float:
-    """Predicts a single image without building multi-tensor batches."""
-    inp = np.expand_dims(img_array, axis=0)
-    pred = float(model(inp, training=False).numpy()[0][0])
+    """Predicts a single image with the TFLite interpreter."""
+    inp = np.expand_dims(img_array, axis=0).astype(np.float32)
+    interpreter.set_tensor(input_details["index"], inp)
+    interpreter.invoke()
+    pred = float(interpreter.get_tensor(output_details["index"])[0][0])
     del inp
     return pred
 
