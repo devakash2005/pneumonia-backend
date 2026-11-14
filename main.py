@@ -173,6 +173,17 @@ class DoctorQuery(BaseModel):
     user_email: str = None  # Optional: logs conversation to DB if provided
 
 
+# Models are tried in this order. If one is unavailable, the next is used.
+# (Google retires old model names, so update this list if you see 404 NOT_FOUND in the logs.)
+GEMINI_MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite']
+
+FRIENDLY_ERROR = (
+    "Sorry, the assistant is not available right now. Please try again in a moment, "
+    "or tap one of the quick questions. If you have trouble breathing or chest pain, "
+    "please see a doctor or go to the nearest hospital."
+)
+
+
 @app.post("/virtual-doctor")
 async def virtual_doctor_response(query: DoctorQuery, db: Session = Depends(get_db)):
     def call_gemini(model_name):
@@ -195,27 +206,22 @@ async def virtual_doctor_response(query: DoctorQuery, db: Session = Depends(get_
         )
 
     reply = ""
-    models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash']
 
-    for model_id in models_to_try:
+    for model_id in GEMINI_MODELS:
         try:
             response = await asyncio.wait_for(
-                asyncio.to_thread(call_gemini, model_id), timeout=10.0
+                asyncio.to_thread(call_gemini, model_id), timeout=15.0
             )
-            if response and hasattr(response, 'text'):
+            if response and getattr(response, 'text', None):
                 reply = response.text
                 break
         except Exception as e:
-            error_str = str(e)
-            print(f"Model {model_id} failed with error: {error_str}")
-            if "503" in error_str or "UNAVAILABLE" in error_str or "high demand" in error_str or "NOT_FOUND" in error_str or "PERMISSION_DENIED" in error_str:
-                continue
-            else:
-                reply = f"Error processing query: {error_str}"
-                break
+            # Technical details go to the Render logs only, never to the user
+            print(f"Model {model_id} failed with error: {e}")
+            continue
 
     if not reply:
-        reply = "The AI service is currently busy. Please verify your API key permissions in Google AI Studio or try again in a moment."
+        reply = FRIENDLY_ERROR
 
     # Automatically save chat history to PostgreSQL if user_email is sent from frontend
     if query.user_email:
